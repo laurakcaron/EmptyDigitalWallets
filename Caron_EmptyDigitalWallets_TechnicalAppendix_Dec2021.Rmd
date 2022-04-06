@@ -1,0 +1,702 @@
+---
+title: 'Technical Appendix: Empty Digital Wallets: New Technologies and Old Inequalities'
+author: "Laura Caron"
+date: "Spring 2021"
+output:
+  word_document: default
+  pdf_document: default
+  html_document:
+    theme: journal
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=30),tidy=TRUE)
+
+```
+
+This technical appendix computes all of the geospatial analysis associated with the paper *Empty Digital Wallets: New Technologies and Old Inequalities in Digital Financial Services Among Women* 
+
+# Data sources
+
+This analysis considers data from several sources.
+1. Demographic and Health Surveys 2016. This survey dataset provides the main traditional source of survey data for the paper. It is geo-coded at the cluster level.
+2. OpenStreetMap. OpenStreetMap queries provide the basis for the analysis of the locations of existing financial institutions. The Overpass query used to export the data is available [here](http://overpass-turbo.eu/s/Ose).
+3. OpenCelliD. This database collects the locations of cell phone towers. This is used to proxy access to mobile digital financial services. It is available [here](https://www.opencellid.org/). The data was pre-processed by converting the range reported in meters to arc degrees using the approximation that 1 meter equals 1/111000 degrees. QGIS was then used to buffer each point to create a circle around each with the range as radius.
+4. Gridded Population of the World (GPW), v4. This dataset provides information on population density at a spatial level. The version used estimates population density for 2015 in 5km grids. The data are available [here](https://sedac.ciesin.columbia.edu/data/set/gpw-v4-population-density-adjusted-to-2015-unwpp-country-totals-rev11/data-download).
+5. Nighttime lights. This dataset has been popularly used to approximate income. It can be used in this analysis to compute spatial Concentration curves for comparison with other variables. The data are available [here](https://earthobservatory.nasa.gov/features/NightLights/page3.php).
+6. Ookla Speed test. This dataset gives mobile network performance. The data from Q1 2019 and can be downloaded [here](https://ookla-open-data.s3.amazonaws.com/shapefiles/performance/type=mobile/year=2019/quarter=1/2019-01-01_performance_mobile_tiles.zip). More information on the data source can be found [here](https://github.com/teamookla/ookla-open-data). The data were taken from Q1 2019 through Q3 2021 and merged in QGIS for speed. 
+ 
+# Setting up the Environment
+
+```{r env_setup, warning=FALSE}
+
+setwd(path)
+renv::restore()
+
+library(knitr)
+library(tidyverse)
+library(sf)
+library(geojsonsf)
+library(haven)
+library(rgdal)
+library(raster)
+library(lmtest)
+library(sandwich)
+library(corrplot)
+library(spdep)
+library(pastecs)
+library(lctools)
+library(stargazer)
+library(margins)
+library(broom)
+library(fastDummies)
+
+path <- "C:/Users/laura/OneDrive/Desktop/Laura's computer/Documents/My Own Documents/Research/Empty Digital Wallets/"
+options(scipen=5,digits = 4)
+
+
+```
+ 
+# 1. Loading the data.  
+This code loads the appropriate packages needed to conduct the analysis and reads the data.
+
+```{r data}
+
+#dhs.sf <- st_read(dhs.path.i)
+#dhs.indiv <- read_dta(dhs.indiv.path.i)
+
+#cell.sf <- read.csv(cell.path.i) %>%
+#  st_as_sf(coords=c("lon", "lat"), crs="+proj=longlat +datum=WGS84 +no_defs")
+
+#borders.sf <- st_read(borders.path.i)
+  
+#banks.sf <- st_read(banks.path.i) %>%
+#  st_cast("POINT")
+
+#popden.raster <- raster(paste0(path,"Data/gpw_v4_population_density_adjusted_to_2015_unwpp_country_totals_rev11_2015_2pt5_min.tif"))
+  
+#ntl.raster <- raster(paste0(path,"Data/BlackMarble_2016_01deg_geo.tif"))
+
+#bbox <- st_bbox(borders.sf)
+
+#speedtest.sf <- st_read(paste0(path, "Data/Ookla/", countries.i, "_clipped/", countries.i, "_merged.shp"))
+
+#save(dhs.sf, dhs.indiv, cell.sf, borders.sf, speedtest.sf, banks.sf, popden.raster, ntl.raster, file=paste0(path, "Data/combined_Dec21/combined", countries.i,".Rdata"))
+
+load(paste0(path, "Data/combined_Dec21/combined", countries.i,".Rdata"))
+
+```
+
+
+# 2. Data Cleaning  
+
+This code cleans the data and prepares it into a format from which the outputs can be readily generated. It ensures that missing values are appropriately handled and that data are of the correct class (numeric, string, etc.). 
+
+```{r dhs_clean}
+
+# Convert download speed to Mbps
+speedtest.sf$avg_d_mbps <- speedtest.sf$avg_d_kbps/1000
+
+# Clean the individual-level data
+dhs.indiv <- dplyr::select(dhs.indiv, v001, v002, v034, v003, v119, v102, v201, v133, v151, v155, v101, v190a, v169a, v169b, v170, v012, v745a, v745b, v501, v701, v730, v732, v478, v477, v719, v739, v850a, v746, v157, v158, v159, v171b, v191a, v191)
+
+dhs.indiv$own_phone <- dhs.indiv$v169a
+dhs.indiv$mobile_dfs <- ifelse(dhs.indiv$own_phone ==1, dhs.indiv$v169b, 0)
+dhs.indiv$trad_fin <- dhs.indiv$v170
+dhs.indiv$eduyears <- ifelse(dhs.indiv$v133 == 98, NA, dhs.indiv$v133)
+dhs.indiv$married <- ifelse(!is.na(dhs.indiv$v501), ifelse(dhs.indiv$v501 == 1, 1, 0), NA)
+dhs.indiv$region <- factor(dhs.indiv$v101)
+dhs.indiv$hhhmale <- ifelse(!is.na(dhs.indiv$v151), ifelse(dhs.indiv$v151 == 1, 1, 0), NA)
+dhs.indiv$urban <- ifelse(!is.na(dhs.indiv$v102), ifelse(dhs.indiv$v102 == 1, 1, 0), NA)
+dhs.indiv$children <- dhs.indiv$v201
+dhs.indiv$own_land <- ifelse(!is.na(dhs.indiv$v745b), ifelse(dhs.indiv$v745b == 0, 0, 1), NA)
+dhs.indiv$wealth_index <- factor(dhs.indiv$v190a)
+dhs.indiv$wealth <- dhs.indiv$v191
+dhs.indiv$age <- dhs.indiv$v012
+dhs.indiv$age2 <- dhs.indiv$age^2
+dhs.indiv$electricity <- ifelse(dhs.indiv$v119==7, NA, dhs.indiv$v119)
+dhs.indiv$only_trad_fin <- ifelse(dhs.indiv$mobile_dfs == 1, 0, dhs.indiv$trad_fin)
+
+# Sample: get rid of observations with missing values
+dhs.indiv <- dhs.indiv %>%
+  dplyr::select(v001, own_phone, mobile_dfs, trad_fin, eduyears, married, region, hhhmale, region, urban, children, own_land, wealth_index, age, age2, electricity, wealth, only_trad_fin) %>%
+  na.omit
+
+# Get the coordinates into their own columns
+dhs_coords <- as.data.frame(st_coordinates(dhs.sf$geometry))
+names(dhs_coords)[1] = "lon"
+names(dhs_coords)[2] = "lat"
+
+dhs.sf$lat <- dhs_coords$lat
+dhs.sf$lon <- dhs_coords$lon
+rm(dhs_coords)
+
+# Take out 0 longitude values
+dhs.sf <- filter(dhs.sf, lon != 0)
+
+# Merge the GPS and individual data 
+dhs_merged.sf <- left_join(dhs.indiv, dhs.sf, by=c(v001 = "DHSCLUST"))
+
+# Get the banks.sf coordinates
+banks_coords <- as.data.frame(st_coordinates(banks.sf$geometry))
+names(banks_coords)[1] = "lon"
+names(banks_coords)[2] = "lat"
+
+banks.sf$lat <- banks_coords$lat
+banks.sf$lon <- banks_coords$lon
+rm(banks_coords)
+
+# Use approximation that each degree of latitude is 111 km
+# Remove cell tower range for those with 5% most extreme ranges
+cell.sf2 <- cell.sf %>%
+    filter(quantile(range, 0.99) > range)
+
+cells_range.sf <- st_read(cell_buffer.path.i) %>% filter(quantile(range, 0.99) > range)
+
+dhs_range.sf <-  st_buffer(dhs.sf, 10000)
+dhs_range.sf$center_lat<- dhs.sf$lat
+dhs_range.sf$center_lon <- dhs.sf$lon
+
+# Calculate cell towers nearby
+i <- st_intersects(dhs_range.sf, cells_range.sf)
+dhs_range.sf$count_cell <-  apply(as.matrix(i), 1, FUN=sum)
+rm(i)
+dhs_range.sf$d_cell <- ifelse(dhs_range.sf$count_cell > 0, 1, 0)
+
+# Calculate GSM towers nearby
+gsm.sf <- cells_range.sf %>%
+    filter(radio == "GSM")
+
+i <- st_intersects(dhs_range.sf, gsm.sf)
+dhs_range.sf$count_gsm <-  apply(as.matrix(i), 1, FUN=sum)
+rm(i)
+
+# Calculate UMTS towers nearby
+umts.sf <- cells_range.sf %>%
+    filter(radio == "UMTS")
+
+i <- st_intersects(dhs_range.sf, umts.sf)
+dhs_range.sf$count_umts <- apply(as.matrix(i), 1, FUN=sum)
+rm(i)
+
+# Calculate LTE towers nearby
+lte.sf <- cells_range.sf %>%
+    filter(radio == "LTE")
+
+i <- st_intersects(dhs_range.sf, lte.sf)
+dhs_range.sf$count_lte <-  apply(as.matrix(i), 1, FUN=sum)
+rm(i)
+
+# Calculate banks nearby
+i <- st_intersects(dhs_range.sf, banks.sf)
+dhs_range.sf$count_banks <-  apply(as.matrix(i), 1, FUN=sum)
+rm(i)
+dhs_range.sf$d_banks <- ifelse(dhs_range.sf$count_banks > 0, 1, 0)
+
+# Add population density, ntl
+dhs_range.sf$popden <- raster::extract(popden.raster, dhs.sf, method="simple")
+dhs_range.sf$ntl <- raster::extract(ntl.raster, dhs.sf, method="simple")
+
+# Add speedtest
+i <- st_intersects(dhs_range.sf, speedtest.sf)
+dhs_range.sf$download <- apply(i, 1, function(z) {
+                    speedtest.sf[unlist(z), "avg_d_mbps"] %>%
+                    st_drop_geometry() %>%
+                    unlist() %>%
+                    mean()
+                    })
+dhs_range.sf$missing_download <- is.na(dhs_range.sf$download)
+rm(i)
+dhs_range.df <- as.data.frame(dhs_range.sf)
+
+# Summarize to the cluster level
+dhs_indiv_sum <- dhs.indiv %>%
+    dplyr::mutate(DHSCLUST = v001) %>%
+  group_by(DHSCLUST) %>%
+    dplyr::summarize(count_indiv = n(), 
+                     cell_phone_n = sum(own_phone), 
+                     cell_phone_prop = sum(own_phone)/count_indiv,
+                     electricity_n = sum(electricity),
+                     electricity_prop = sum(electricity)/count_indiv,
+                     mobile_dfs_n = sum(mobile_dfs),
+                     mobile_dfs_prop = sum(mobile_dfs)/count_indiv, 
+                     trad_fin_n = sum(trad_fin),
+                     trad_fin_prop = sum(trad_fin)/count_indiv, 
+                     only_trad_n = sum(only_trad_fin), 
+                     only_trad_prop = sum(only_trad_fin)/count_indiv) 
+
+
+dhs_indiv_sum <- dhs_indiv_sum %>%
+      inner_join(dhs_range.df, by="DHSCLUST") %>%
+      mutate(log_cell = log(count_cell+1),
+             log_bank = log(count_banks+1), 
+             log_popden = log(popden+1), 
+             log_ntl = log(ntl+1), 
+             log_gsm = log(count_gsm+1), 
+             log_umts = log(count_umts+1), 
+             log_lte = log(count_lte+1), 
+             percent_gsm = count_gsm/count_cell, 
+             percent_umts = count_umts/count_cell, 
+             percent_lte = count_lte/count_cell)
+
+dhs.indiv <- dhs.indiv %>%
+             mutate(DHSCLUST = v001) %>%
+             left_join(dhs_range.df, by="DHSCLUST") %>%
+      mutate(log_cell = log(count_cell+1),
+             log_bank = log(count_banks+1), 
+             log_popden = log(popden+1), 
+             log_ntl = log(ntl+1), 
+             log_gsm = log(count_gsm+1), 
+             log_umts = log(count_umts+1), 
+             log_lte = log(count_lte+1), 
+             percent_gsm = count_gsm/count_cell, 
+             percent_umts = count_umts/count_cell, 
+             percent_lte = count_lte/count_cell)
+
+
+```
+
+# 3. Analysis
+
+
+# 3a. Documenting Inequalities in Infrastructure and Access
+
+```{r spatial_gini}
+# Convert to the spatial format needed
+dhs_indiv_sum.poly <- dhs_indiv_sum %>%
+                      st_as_sf() %>% 
+                      as_Spatial(cast=T)
+
+# Calculating nearest neighbors based on distance
+coords<-cbind(dhs_indiv_sum.poly@data$center_lon, dhs_indiv_sum.poly@data$center_lat)
+W<-nb2listw(dnearneigh(coords,0,10,longlat = TRUE), zero.policy = T)
+print.listw(W, zero.policy=T)
+W.mat <-nb2mat(dnearneigh(coords,0,10,longlat = TRUE), zero.policy = T, style="B")
+
+# Now with these distances we can calculate spatial gini
+gini.banks <- spGini.w(dhs_indiv_sum$count_banks, W.mat)
+gini.dbanks <- spGini.w(dhs_indiv_sum$d_banks, W.mat)
+gini.cell_tower <- spGini.w(dhs_indiv_sum$count_cell, W.mat)
+gini.dtower <- spGini.w(dhs_indiv_sum$d_cell, W.mat)
+gini.phone <-spGini.w(dhs_indiv_sum$cell_phone_prop, W.mat)
+gini.nightlights <-spGini.w(dhs_indiv_sum$ntl, W.mat)
+gini.pop_density <-spGini.w(dhs_indiv_sum$popden, W.mat)
+gini.dfs_use <-spGini.w(dhs_indiv_sum$mobile_dfs_prop, W.mat)
+gini.trad_use <-spGini.w(dhs_indiv_sum$trad_fin_prop, W.mat)
+gini.gsm <- spGini.w(dhs_indiv_sum$count_gsm, W.mat)
+gini.umts <- spGini.w(dhs_indiv_sum$count_umts, W.mat)
+gini.lte <- spGini.w(dhs_indiv_sum$count_lte, W.mat)
+# Bounding
+gini.only_trad <- spGini.w(dhs_indiv_sum$only_trad_prop, W.mat)
+
+# Convert to the spatial format needed
+dhs_indiv_sum.poly <- dhs_indiv_sum %>%
+                      filter(!is.na(download)) %>%
+                      st_as_sf() %>% 
+                      as_Spatial(cast=T)
+coords<-cbind(dhs_indiv_sum.poly@data$center_lon, dhs_indiv_sum.poly@data$center_lat)
+W<-nb2listw(dnearneigh(coords,0,10,longlat = TRUE), zero.policy = T)
+print.listw(W, zero.policy=T)
+W.mat2 <-nb2mat(dnearneigh(coords,0,10,longlat = TRUE), zero.policy = T, style="B")
+gini.download <- spGini.w(na.omit(dhs_indiv_sum$download), W.mat2)
+
+# Put into a matrix
+tab2 <- data.frame(c("Number of banks", "Have a bank", "Number of cell tower", "Have a cell tower", "Mobile phone", "Nightlights", "Population density", "DFS use", "Traditional finance", "Only traditional finance", "GSM", "UMTS", "LTE", "Download Speed"), 
+        c(gini.banks[1], gini.dbanks[1], gini.cell_tower[1], gini.dtower[1], gini.phone[1], gini.nightlights[1], gini.pop_density[1], gini.dfs_use[1], gini.trad_use[1], gini.only_trad[1], gini.gsm[1], gini.umts[1], gini.lte[1], gini.download[1]),
+        c(gini.banks[2], gini.dbanks[2], gini.cell_tower[2], gini.dtower[2], gini.phone[2], gini.nightlights[2], gini.pop_density[2], gini.dfs_use[2], gini.trad_use[2], gini.only_trad[2], gini.gsm[2], gini.umts[2], gini.lte[2], gini.download[2]),
+        c(gini.banks[3], gini.dbanks[3], gini.cell_tower[3], gini.dtower[3], gini.phone[3], gini.nightlights[3], gini.pop_density[3], gini.dfs_use[3], gini.trad_use[3], gini.only_trad[3], gini.gsm[3], gini.umts[3], gini.lte[3], gini.download[3]))
+
+names(tab2)[1] <- ""
+names(tab2)[2] <- "Overall Spatial Gini"
+names(tab2)[3] <- "Between neighbors"
+names(tab2)[4] <- "Between non-neighbors"
+
+kable(tab2)
+
+
+```
+
+```{r concentration_curves}
+
+# Individual level
+indiv.lorenz.df <- dhs.indiv %>% 
+      arrange(wealth) %>%
+    mutate(n= 1, 
+           wealth = wealth -min(wealth),
+           cum_wealth=cumsum(wealth)/max(cumsum(wealth)),
+           cum_phone=cumsum(own_phone)/max(cumsum(own_phone)),
+           cum_trad_fin=cumsum(trad_fin)/max(cumsum(trad_fin)),
+           cum_dfs=cumsum(mobile_dfs)/max(cumsum(mobile_dfs)),
+           cum_pop=cumsum(n)/max(cumsum(n)), 
+           cum_only_trad=cumsum(only_trad_fin)/(max(cumsum(only_trad_fin))))
+
+ # Combined individual concentration curves
+  ggplot(indiv.lorenz.df, aes(size="test")) +
+    geom_line(aes(x=cum_pop, y=cum_wealth, color="wealth index", linetype="wealth index")) +
+    geom_line(aes(x=cum_pop, y=cum_phone, color="mobile phone", linetype="mobile phone")) +
+    geom_line(aes(x=cum_pop, y=cum_trad_fin, color="traditional finance", linetype="traditional")) +
+    geom_line(aes(x=cum_pop, y=cum_only_trad, color="only traditional finance", linetype="only traditional")) +
+    geom_line(aes(x=cum_pop, y=cum_dfs, color="DFS", linetype="DFS")) +
+    theme_minimal()+
+    scale_color_brewer(name="", palette="Dark2") +
+    scale_x_continuous(name="Cumulative share of wealth", limits=c(0,1), expand=c(0,0)) + 
+    scale_y_continuous(name="Cumulative share of variable", limits=c(0,1), expand=c(0,0)) +     scale_size_manual( values = 1, guide=FALSE) +
+    scale_linetype_manual(name="", guide=FALSE, values=c(1, 2, 3, 4, 5))+
+    labs(title="Philippines") +
+    geom_abline() +
+    guides(colour = guide_legend(override.aes = list(linetype = c(1, 2, 3, 4, 5), size=1))) +
+    theme(panel.grid.major = element_line(colour = "transparent"), panel.grid.minor = element_blank(),
+          panel.border = element_rect(colour = "black", fill=NA, size=.5)
+)
+
+```
+
+
+
+# 3b. A Lack of Infrastructure Hurts Access to Traditional Finance and DFS 
+
+```{r descriptive}
+
+## Alternative form of weights matrix
+W.c<-as(as_dgRMatrix_listw(W), "CsparseMatrix")
+trMat<-trW(W.c, type="mult")
+
+## Graph correlation between key variables to look at multicollinearity
+corrplot(cor(dplyr::select(dhs_indiv_sum, cell_phone_prop, trad_fin_prop, electricity_prop, log_cell, count_cell, log_bank, count_banks, log_popden, log_ntl)))
+
+## Descriptive statistics: cluster level
+#stat.desc(dplyr::select(dhs_indiv_sum, cell_phone_prop, mobile_dfs_prop, trad_fin_prop, only_trad_prop, electricity_prop, log_cell, count_cell, log_bank, count_banks, log_popden, log_ntl, log_gsm, log_umts, log_lte, download))
+
+desc <- sapply(seq(1:15), function(z){
+    t<-dplyr::select(dhs_indiv_sum, cell_phone_prop, mobile_dfs_prop, trad_fin_prop, only_trad_prop, electricity_prop, log_cell, count_cell, log_bank, count_banks, log_popden, log_ntl, log_gsm, log_umts, log_lte, download)[,z] %>% unlist()
+    c("mean" =mean(t, na.rm=T), "min" =min(t, na.rm=T), "max" = max(t,na.rm=T), "N"=length(na.omit(t)))
+  })
+
+colnames(desc) <- c("cell_phone_prop", "mobile_dfs_prop", "trad_fin_prop", "only_trad_prop", "electricity_prop", "log_cell", "count_cell", "log_bank", "count_banks", "log_popden", "log_ntl", "log_gsm", "log_umts", "log_lte", "download")
+
+desc
+
+```
+
+## 3bi. Cluster-level models, base specification
+
+```{r}
+
+base_controls <- c("electricity_prop", "log_cell", "log_bank", "log_popden", "log_ntl")
+
+## Download speed predicted by infrastructure
+download.lm <- lm(paste("download~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(download.lm, vcov = vcovHC(download.lm, type="HC1"))
+nobs(download.lm)
+summary(download.lm)$r.squared
+
+## Phone ownership
+cell.lm <- lm(paste("cell_phone_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(cell.lm, vcov = vcovHC(cell.lm, type="HC1"))
+nobs(cell.lm)
+summary(cell.lm)$r.squared
+
+## DFS
+dfsuse.lm <- lm(paste("mobile_dfs_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(dfsuse.lm, vcov = vcovHC(dfsuse.lm, type="HC1"))
+nobs(dfsuse.lm)
+summary(dfsuse.lm)$r.squared
+
+## Traditional finance
+tradfin.lm <- lm(paste("trad_fin_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(tradfin.lm, vcov = vcovHC(tradfin.lm, type="HC1"))
+nobs(tradfin.lm)
+summary(tradfin.lm)$r.squared
+
+## Only traditional finance
+only_tradfin.lm <- lm(paste("only_trad_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(only_tradfin.lm, vcov = vcovHC(only_tradfin.lm, type="HC1"))
+nobs(only_tradfin.lm)
+summary(only_tradfin.lm)$r.squared
+
+# Plot residuals against download speed
+graph_residuals <- function(model, title) {
+
+graph_data <- cbind(dhs_indiv_sum$download[!is.na(dhs_indiv_sum$download)], model$residuals[!is.na(dhs_indiv_sum$download)]) %>% as.data.frame()
+ggplot(data=graph_data, aes(x=V1, y=V2)) + 
+  geom_point() + 
+  geom_smooth(aes(color="Linear fit", fill="Linear"), method="lm", linetype="dashed") + 
+  geom_smooth(aes(color="LOESS fit", fill="LOESS"), method="loess") +
+  geom_hline(aes(yintercept=0, color="Zero association", fill="Zero association")) +
+  scale_color_manual(values=c("Linear fit" = "#f0517e", "LOESS fit" = "#3950a3", "Zero association" = "lightgray"), guide="none") +
+  scale_fill_manual(name="", values=c("Linear" = "#f0517e", "LOESS" = "#3950a3", "Zero association" = "lightgray"), guide=guide_legend(override.aes=list(alpha=0.2, color=c("#f0517e", "#3950a3", "lightgray"), linetype=c("dashed", "solid", "solid")))) +
+  labs(x="Download speed (Mpbs)", y=paste0("Residual (", title, ")")) +
+theme_minimal()
+}
+
+graph_residuals(cell.lm, "mobile phone ownership")
+graph_residuals(dfsuse.lm, "DFS use")
+graph_residuals(tradfin.lm, "traditional finance use")
+graph_residuals(only_tradfin.lm, "only traditional finance use")
+
+
+```
+
+
+## 3bi. Cluster-level models, type of tower
+
+```{r}
+
+base_controls <- c("electricity_prop", "log_gsm", "log_umts", "log_lte", "log_bank", "log_popden", "log_ntl")
+
+## Download speed predicted by infrastructure
+download.lm <- lm(paste("download~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(download.lm, vcov = vcovHC(download.lm, type="HC1"))
+nobs(download.lm)
+summary(download.lm)$r.squared
+
+## Phone ownership
+cell.lm <- lm(paste("cell_phone_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(cell.lm, vcov = vcovHC(cell.lm, type="HC1"))
+nobs(cell.lm)
+summary(cell.lm)$r.squared
+
+## DFS
+dfsuse.lm <- lm(paste("mobile_dfs_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(dfsuse.lm, vcov = vcovHC(dfsuse.lm, type="HC1"))
+nobs(dfsuse.lm)
+summary(dfsuse.lm)$r.squared
+
+## Traditional finance
+tradfin.lm <- lm(paste("trad_fin_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(tradfin.lm, vcov = vcovHC(tradfin.lm, type="HC1"))
+nobs(tradfin.lm)
+summary(tradfin.lm)$r.squared
+
+## Only traditional finance
+only_tradfin.lm <- lm(paste("only_trad_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(only_tradfin.lm, vcov = vcovHC(only_tradfin.lm, type="HC1"))
+nobs(only_tradfin.lm)
+summary(only_tradfin.lm)$r.squared
+
+# Plot residuals against download speed
+graph_residuals(cell.lm, "mobile phone ownership")
+graph_residuals(dfsuse.lm, "DFS use")
+graph_residuals(tradfin.lm, "traditional finance use")
+graph_residuals(only_tradfin.lm, "only traditional finance use")
+
+
+```
+
+## 3bii. Cluster-level models, control for download speed
+
+
+```{r}
+
+base_controls <- c("electricity_prop", "log_cell", "download", "log_bank", "log_popden", "log_ntl")
+
+## Phone ownership
+cell.lm <- lm(paste("cell_phone_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(cell.lm, vcov = vcovHC(cell.lm, type="HC1"))
+nobs(cell.lm)
+summary(cell.lm)$r.squared
+
+## DFS
+dfsuse.lm <- lm(paste("mobile_dfs_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(dfsuse.lm, vcov = vcovHC(dfsuse.lm, type="HC1"))
+nobs(dfsuse.lm)
+summary(dfsuse.lm)$r.squared
+
+## Traditional finance
+tradfin.lm <- lm(paste("trad_fin_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(tradfin.lm, vcov = vcovHC(tradfin.lm, type="HC1"))
+nobs(tradfin.lm)
+summary(tradfin.lm)$r.squared
+
+## Only traditional finance
+only_tradfin.lm <- lm(paste("only_trad_prop~", paste(base_controls, collapse="+")), data = dhs_indiv_sum)
+coeftest(only_tradfin.lm, vcov = vcovHC(only_tradfin.lm, type="HC1"))
+nobs(only_tradfin.lm)
+summary(only_tradfin.lm)$r.squared
+
+# Plot residuals against download speed
+graph_residuals(cell.lm, "mobile phone ownership")
+graph_residuals(dfsuse.lm, "DFS use")
+graph_residuals(tradfin.lm, "traditional finance use")
+graph_residuals(only_tradfin.lm, "only traditional finance use")
+
+
+```
+
+
+# 3c: Individual Factors Determining Use
+
+```{r logit}
+
+# Descriptive statistics
+dhs.indiv <- dhs.indiv %>% dummy_cols("wealth_index")
+
+# stat.desc(dplyr::select(dhs.indiv, own_phone, mobile_dfs, trad_fin, log_cell, log_gsm, log_umts, log_lte, download, log_bank, age, urban, children, eduyears, hhhmale, married, wealth_index_1, wealth_index_2, wealth_index_3, wealth_index_4, wealth_index_5 ))
+
+desc <- sapply(seq(1:20), function(z){
+    t<-dplyr::select(dhs.indiv, own_phone, mobile_dfs, trad_fin, log_cell, log_gsm, log_umts, log_lte, download, log_bank, age, urban, children, eduyears, hhhmale, married, wealth_index_1, wealth_index_2, wealth_index_3, wealth_index_4, wealth_index_5) %>% filter(!is.na(log_cell))
+    t <- t[,z] %>% unlist()
+    c("mean" =mean(t, na.rm=T), "min" =min(t, na.rm=T), "max" = max(t,na.rm=T), "N"=length(na.omit(t)))
+  })
+
+colnames(desc) <- c("own_phone", "mobile_dfs", "trad_fin", "log_cell", "log_gsm", "log_umts", "log_lte", "download", "log_bank", "age", "urban", "children", "eduyears", "hhhmale", "married", "wealth_index_1", "wealth_index_2", "wealth_index_3", "wealth_index_4", "wealth_index_5")
+
+desc
+
+# Define a function to handle the regressions and make it easier
+logit.custom <- function(y, controls, filter=F){
+
+  if(filter ==T){
+    data <- filter(dhs.indiv, own_phone==1)
+  } else{
+    data <- dhs.indiv
+  }
+
+  f <- as.formula(paste(y, "~", paste(controls, collapse="+")))
+  logit <- glm(f, data=data, family = "binomial")
+  null.logit <- glm(f=as.formula(paste(y, "~1")), data=model.frame(logit), family="binomial")
+  v <- vcovCL(logit, type="HC1", cluster = ~v001)
+  m <- margins(logit, vcov=v, data=data)
+  meffects <- apply(marginal_effects(logit),2, FUN=mean)
+  meffects <- meffects[order(names(meffects))]
+  mvar <-apply(dplyr::select(m, starts_with("Var")), 2, FUN=function(x) mean(x, na.rm=T))
+  mvar <- mvar[order(names(meffects))]
+  mse <- sqrt(mvar)
+  df <- length(data) -length(controls) 
+  mpvalue <- 1- pt(abs(meffects)/mse, df)
+  tidymodel <- tidy(logit)
+  tidymodel <- tidymodel[order(tidymodel$term), ]
+  tidymodel$clusteredse <- sqrt(diag(v))
+  tidymodel$meffects <- NA
+  tidymodel$mse <- NA
+  tidymodel$mpvalue <-NA
+  tidymodel$meffects[2:nrow(tidymodel)] <-meffects
+  tidymodel$mse[2:nrow(tidymodel)] <-mse  
+  tidymodel$mpvalue[2:nrow(tidymodel)] <- mpvalue
+  tidymodel$mcfadden <- 1- logLik(logit)/logLik(null.logit)
+  tidymodel$N <- nobs(logit)
+
+  return(list(logit, v, tidymodel)) 
+}
+
+
+## Individual characteristics with location characteristics
+full.controls <- c("age", "age2", "urban", "children", "eduyears", "hhhmale", "region", "own_land", "married", "log_cell", "log_bank", "wealth_index_2", "wealth_index_3", "wealth_index_4", "wealth_index_5")
+
+phone.logit.loc <- logit.custom("own_phone", full.controls, filter=F)
+dfs.logit.loc <- logit.custom("mobile_dfs", full.controls, filter=T)
+trad_fin.logit.loc <- logit.custom("trad_fin", full.controls, filter=T)
+trad_fin_fil.logit.loc <- logit.custom("trad_fin", full.controls, filter=F)
+only_trad_fin.logit.loc <- logit.custom("only_trad_fin", full.controls, filter=F)
+
+stargazer(list(phone.logit.loc[[1]], dfs.logit.loc[[1]], trad_fin.logit.loc[[1]], trad_fin_fil.logit.loc[[1]], only_trad_fin.logit.loc[[1]]),
+           se = list(sqrt(diag(phone.logit.loc[[2]])), sqrt(diag(dfs.logit.loc[[2]])), sqrt(diag(trad_fin.logit.loc[[2]])), sqrt(diag(trad_fin_fil.logit.loc[[2]])), sqrt(diag(only_trad_fin.logit.loc[[2]]))),
+           type="text")
+
+l <- list(phone.logit.loc, dfs.logit.loc, trad_fin_fil.logit.loc, only_trad_fin.logit.loc)
+for (model in seq(1, 4)){
+  model <- l[[model]]
+  print(cbind(model[[3]]$term, model[[3]]$meffects, model[[3]]$mse, model[[3]]$mpvalue))
+  print(mean(model[[3]]$N))
+  print(mean(model[[3]]$mcfadden))
+}
+
+
+## Individual characteristics with download speed control
+full.controls <- c("age", "age2", "urban", "children", "eduyears", "hhhmale", "region", "own_land", "married", "log_gsm", "log_umts", "log_lte", "log_bank", "wealth_index_2", "wealth_index_3", "wealth_index_4", "wealth_index_5", "download")
+
+phone.logit.loc2 <- logit.custom("own_phone", full.controls, filter=F)
+dfs.logit.loc2 <- logit.custom("mobile_dfs", full.controls, filter=T)
+trad_fin.logit.loc2 <- logit.custom("trad_fin", full.controls, filter=T)
+trad_fin_fil.logit.loc2 <- logit.custom("trad_fin", full.controls, filter=F)
+only_trad_fin.logit.loc2 <- logit.custom("only_trad_fin", full.controls, filter=F)
+
+stargazer(list(phone.logit.loc2[[1]], dfs.logit.loc2[[1]], trad_fin.logit.loc2[[1]], trad_fin_fil.logit.loc2[[1]], only_trad_fin.logit.loc2[[1]]),
+           se = list(sqrt(diag(phone.logit.loc2[[2]])), sqrt(diag(dfs.logit.loc2[[2]])), sqrt(diag(trad_fin.logit.loc2[[2]])), sqrt(diag(trad_fin_fil.logit.loc2[[2]])), sqrt(diag(only_trad_fin.logit.loc2[[2]]))),
+           type="text")
+
+l <- list(phone.logit.loc2, dfs.logit.loc2, trad_fin_fil.logit.loc2, only_trad_fin.logit.loc2)
+for (model in seq(1, 4)){
+  model <- l[[model]]
+  print(cbind(model[[3]]$term, model[[3]]$meffects, model[[3]]$mse, model[[3]]$mpvalue))
+  print(mean(model[[3]]$N))
+  print(mean(model[[3]]$mcfadden))
+}
+
+## Individual characteristics with download speed control
+full.controls <- c("age", "age2", "urban", "children", "eduyears", "hhhmale", "region", "own_land", "married", "log_cell","log_bank", "wealth_index_2", "wealth_index_3", "wealth_index_4", "wealth_index_5", "download")
+
+phone.logit.loc3 <- logit.custom("own_phone", full.controls, filter=F)
+dfs.logit.loc3 <- logit.custom("mobile_dfs", full.controls, filter=T)
+trad_fin.logit.loc3 <- logit.custom("trad_fin", full.controls, filter=T)
+trad_fin_fil.logit.loc3 <- logit.custom("trad_fin", full.controls, filter=F)
+only_trad_fin.logit.loc3 <- logit.custom("only_trad_fin", full.controls, filter=F)
+
+stargazer(list(phone.logit.loc3[[1]], dfs.logit.loc3[[1]], trad_fin.logit.loc3[[1]], trad_fin_fil.logit.loc3[[1]], only_trad_fin.logit.loc3[[1]]),
+           se = list(sqrt(diag(phone.logit.loc3[[2]])), sqrt(diag(dfs.logit.loc3[[2]])), sqrt(diag(trad_fin.logit.loc3[[2]])), sqrt(diag(trad_fin_fil.logit.loc3[[2]])), sqrt(diag(only_trad_fin.logit.loc3[[2]]))),
+           type="text")
+
+l <- list(phone.logit.loc3, dfs.logit.loc3, trad_fin_fil.logit.loc3, only_trad_fin.logit.loc3)
+for (model in seq(1, 4)){
+  model <- l[[model]]
+  print(cbind(model[[3]]$term, model[[3]]$meffects, model[[3]]$mse, model[[3]]$mpvalue))
+  print(mean(model[[3]]$N))
+  print(mean(model[[3]]$mcfadden))
+}
+
+```
+
+# Figures
+
+```{r}
+
+banks.sf<-banks.sf %>%
+    filter(rowSums(st_within(banks.sf, borders.sf, sparse=FALSE))==1)
+
+ggplot() +
+    geom_sf(data=borders.sf, fill="transparent")  +
+    geom_sf(data=st_as_sf(dhs_indiv_sum), aes(fill=trad_fin_prop*100), color="transparent", size=.75, alpha=0.8) +
+    scale_fill_distiller(name="Percent\nwith account", palette="Greens", na.value="transparent", direction=1) +
+    scale_alpha(range = c(0.00, 0.25), guide = FALSE) +
+    geom_sf(data=banks.sf, aes(geometry=geometry, color="Banks"), alpha=0.1, size=.15) +
+    scale_color_manual(name="", values=c("Banks" = "navyblue"), guide=guide_legend(override.aes=list(size=3, alpha=1, fill="navyblue")))+
+    theme_void() + 
+    theme(panel.grid.major = element_line(colour = "transparent"), panel.grid.minor = element_blank()) 
+ 
+ggplot() +
+    geom_sf(data=borders.sf, fill="transparent")  +
+    geom_sf(data=st_as_sf(dhs_indiv_sum), aes(fill=mobile_dfs_prop*100), color="transparent", size=.75, alpha=0.8) +
+      scale_fill_distiller(name="Percent\nusing DFS", palette="Purples", na.value="transparent", direction=1) +
+    scale_alpha(range = c(0.00, 0.25), guide = FALSE) +
+    geom_sf(data=cell.sf, aes(geometry=geometry, color=factor(cell.sf$radio, levels=c("GSM", "UMTS","LTE"))), alpha=0.1, size=.15) +
+    scale_color_brewer(name="Mobile phone\ntower type", type="seq", palette="YlOrRd", guide=guide_legend(override.aes=list(size=3, alpha=1))) +
+    theme_void() + 
+    theme(panel.grid.major = element_line(colour = "transparent"), panel.grid.minor = element_blank())  
+
+ggplot() +
+    geom_sf(data=borders.sf, fill="transparent")  +
+    geom_sf(data=st_as_sf(dhs_indiv_sum), aes(fill=download), color="transparent", size=.75, alpha=1) +
+    geom_sf(data=cell.sf, aes(geometry=geometry, color=factor(cell.sf$radio, levels=c("GSM", "UMTS","LTE"))), alpha=0.05, size=.15) +
+    scale_fill_distiller(name="Avg download\nspeed (Mbps)", palette="PuBuGn", na.value="transparent", direction=1) +
+    scale_alpha(range = c(0.00, 0.25), guide = FALSE) +
+    scale_color_brewer(name="Mobile phone\ntower type", type="seq", palette="YlOrRd", guide=guide_legend(override.aes=list(size=3, alpha=1))) +
+    theme_void() + 
+    theme(panel.grid.major = element_line(colour = "transparent"), panel.grid.minor = element_blank())  
+
+
+ggplot() +
+    geom_sf(data=borders.sf, fill="transparent")  +
+    geom_sf(data=st_as_sf(dhs_indiv_sum), aes(fill=log_popden), color="transparent", size=.75, alpha=0.6) +
+    scale_fill_distiller(name="Logged\npopulation density", palette="Greys", na.value="transparent", direction=1) +
+    scale_alpha(range = c(0.00, 0.25), guide = FALSE) +
+    geom_sf(data=cell.sf, aes(geometry=geometry, color="Mobile phone\ntowers"), alpha=0.1, size=.15) +
+    geom_sf(data=banks.sf, aes(geometry=geometry, color="Banks"), alpha=0.1, size=.15) +
+    scale_color_manual(name="", values=c("Mobile phone\ntowers" = "darkred", "Banks"="navyblue"), guide=guide_legend(override.aes=list(size=3, alpha=1, fill=c("navyblue", "darkred"))))+
+    theme_void() + 
+    theme(panel.grid.major = element_line(colour = "transparent"), panel.grid.minor = element_blank()) 
+
+```
+
